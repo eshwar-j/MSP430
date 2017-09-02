@@ -31,3 +31,31 @@ Makefile.in
 # http://www.gnu.org/software/texinfo
 
 /texinfo.tex
+*.pdsprj
+*.mac
+*.dnx
+*.xcl
+*.bat
+*.wsdt
+*.dbgdt
+*.ps1
+*.dep
+*.ewp
+*.r43
+*.map
+*.hex
+*.pbi
+*.log
+*.workspace
+*.ld
+*.pbd
+*.pdsbak
+*.browse
+*.linf
+*.eww
+*.m43
+*.d43
+*.txt
+*.ino
+*.properties
+*.md

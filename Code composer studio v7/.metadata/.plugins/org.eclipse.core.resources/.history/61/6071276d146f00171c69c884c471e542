@@ -1,0 +1,215 @@
+/* i2cerase_G2231.c:
+ *
+ * Fill 24xx08 flash EEPROM -> Entire 1024 bytes of EEPROM are written with
+ * the character specified by fill_char. A fill_char of 0xff is an erase.
+ *
+ * Since no UART is used, DCO is set to 1 MHZ.  Bytes are written individually
+ * rather than by page in this example. To accommodate the 5 ms settling time
+ * for write commands, a __delay_cycles() command is used.
+ *
+ *  ::  Copyright 2013, MSPSCI
+ *  ::  http://mspsci.blogspot.com
+ */
+
+#include <msp430G2231.h>
+
+/*  External Connections  */
+#define LED1        BIT0
+
+/*  SCFG Flags  */
+#define I2C_Write   BIT3        // BIT3 indicates write instruction
+#define I2C_Ready   BIT4        // BIT4 indicates Rx Buffer ready
+
+/*  USI Definitions  */
+#define SAdrs           0x50    // Base address for 24xx08
+#define fill_char       0xff    // Character to fill
+#define blocks          4       // Number of blocks on the device
+
+/*  Global Variables  */
+unsigned int ITXBuffer;         // Buffer for transmitting over I2C
+unsigned int IRXBuffer;         // Buffer for receiving over I2C
+unsigned int slave_address;     // Address of EEPROM Slave, including block index
+unsigned int pageSize = 1;     // Size of page for write commands
+unsigned int pageBuffer[2];    // Buffer for Rx page
+char SCFG=0;                    // flags for serial communication
+
+
+/*  Function Definitions  */
+void DCO_init(void);
+void P1_init(void);
+void TA_init(void);
+void USI_init(void);
+
+int main(void) {
+    unsigned int i,j;
+
+    WDTCTL = WDTPW + WDTHOLD;   // Stop watchdog timer
+    DCO_init();
+    P1_init();
+    TA_init();
+    USI_init();
+
+    __enable_interrupt();
+
+    pageBuffer[1]=fill_char;
+    SCFG |= BIT3;
+
+    for (i=0; i<blocks; i++) {
+        slave_address = SAdrs + i;  // Write to next block
+        for (j=0; j<256; j++) {
+            while(SCFG & BIT4)      // Ensure previous transmission is complete
+                _nop();
+            pageBuffer[0] = j;      // Write to next address
+            USICTL1 |= USIIFG;
+            __delay_cycles(5000);   // Wait 5 ms for write settle
+        }
+    }
+
+    P1OUT |= LED1;      // Indicate transmission complete
+    while (1) {
+        _BIS_SR(LPM0_bits);
+    }
+}
+
+
+void DCO_init(void) {
+    char j;
+    if ((CALBC1_1MHZ== 0xFF) || (CALDCO_1MHZ == 0xFF)) {
+        /* DCO Calibrations not present! Trap processor to prevent damage.
+         * Flash LED on P1.0 in patterns of three to indicate DCO error.
+         */
+        P1OUT=0;
+        P1DIR=LED1;
+        for(;;) {
+            for (j=0; j<6; j++) {
+                P1OUT ^= LED1;
+                __delay_cycles(50000);
+            }
+            for (j=0; j<3; j++) {
+                __delay_cycles(50000);
+            }
+        }
+    } // end if for DCO trap.
+    else {
+        BCSCTL1 = CALBC1_1MHZ;
+        DCOCTL = CALDCO_1MHZ;
+    }
+} // DCO_init
+
+void P1_init(void) {
+    P1OUT = 0;
+    P1DIR = LED1;
+} // P1_init
+
+void TA_init(void) {
+    TACTL = TASSEL_2 + ID_0 + MC_2; // SMCLK, DIV 1, Continuous
+} // TA_init
+
+void USI_init(void) {
+    USICTL0 = USIPE6 + USIPE7 + USIMST + USISWRST;
+        // Enable ports and set as master
+    USICTL1 = USII2C + USIIE;       // I2C mode, enable interrupts
+    USICKCTL = USISSEL_2 + USIDIV_3 + USICKPL;
+        // Use SMCLK/8, Mode 3 phase/polarity
+    USICNT |= USIIFGCC;             // Disable automatic clear control
+    USICTL0 &= ~USISWRST;           // Enable USI
+    USICTL1 &= ~USIIFG;             // Clear any early flags
+} // USI_init
+
+
+/*  Interrupt Service Routines  */
+#pragma vector = USI_VECTOR
+__interrupt void USI_I2C(void) {
+    static enum { Idle = 0,
+          Address = 1,
+          AddressAck = 2,
+          Data = 3,
+          DataAck = 4,
+          PrepStop = 5,
+          Stop = 6
+        } I2C_State = Address;
+    static unsigned int byte_count = 0;
+
+    switch(I2C_State) {
+        case Idle:
+            break;
+
+        case Address:        // Generate Start condition, send address + r/w
+            SCFG |= BIT4;
+            USISRL = 0x00;   // Send low value for start condition
+            USICTL0 |= USIOE + USIGE;  // Control SDA, disable latch
+            USICTL0 &= ~USIGE;         // reenable latch
+            if (SCFG & BIT3)           // Transmitting
+                USISRL = (slave_address << 1);
+            else                       // Receiving
+                USISRL = (slave_address << 1) + 1;
+            USICNT |= 8;
+            I2C_State = AddressAck;
+            break;
+
+        case AddressAck:     // Receive acknowledge bit from slave
+            USICTL0 &= ~USIOE;         // Relinquish SDA
+            USICNT |= 1;               // receive 1 bit
+            I2C_State = Data;
+            break;
+
+        case Data:  // Handle ack/nack, Tx/Rx Data if ack
+            if (USISRL & BIT0) {  // nack received, cancel
+                USICTL0 |= USIOE;      // Control SDA
+                USISRL = 0;            // prep for stop condition, set SDA low
+                USICNT |= 1;           // send 1 bit
+                I2C_State = Stop;
+            }
+            else {
+                if (SCFG & BIT3) {     // Transmit
+                    USICTL0 |= USIOE;  // Control SDA
+                    USISRL = pageBuffer[byte_count++];  // Load data to send
+                    USICNT |= 8;       // send 8 bits
+                }
+                else {  // Receive
+                    USICTL0 &= ~USIOE; // Relinquish SDA
+                    USICNT |= 8;       // receive 8 bits
+                }
+                I2C_State = DataAck;
+            }
+            break;
+
+        case DataAck:        // receive ack or save Rx
+            if (SCFG & BIT3) {         // check for ack bit
+                USICTL0 &= ~USIOE;     // Relinquish SDA
+                USICNT |= 1;           // receive 1 bit
+                if (byte_count > pageSize)
+                    I2C_State = PrepStop;
+                else
+                    I2C_State = Data;
+            }
+            else {           // Save IRXBuffer
+                IRXBuffer = USISRL;
+                SCFG |= BIT5;          // Flag Rx Buffer ready
+                USICTL0 |= USIOE;      // Control SDA
+                USISRL = 0xFF;         // Rx done, send nack
+                USICNT |= 1;
+                I2C_State = PrepStop;
+            }
+            break;
+
+        case PrepStop:       // Ensure SDA is low for stop condition
+            USICTL0 |= USIOE;          // Control SDA
+            USISRL = 0x00;
+            USICNT |= 1;               // Send 1 bit
+            I2C_State = Stop;
+            break;
+
+        case Stop:           // Generate Stop Condition
+            USISRL = 0xFF;             // Send high value for stop condition
+            USICTL0 |= USIGE;          // enable latch
+            USICTL0 &= ~(USIGE+USIOE); // disable latch and output
+            byte_count = 0;
+            I2C_State = Address;
+            SCFG &= ~BIT4;
+//            __low_power_mode_off_on_exit();
+            break;
+    }
+
+    USICTL1 &= ~USIIFG;      // Clear USI interrupt flag
+}

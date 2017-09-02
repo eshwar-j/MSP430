@@ -1,0 +1,7 @@
+#include"msp430.h"
+#include"usi_i2c.h"
+
+void main()
+{
+
+}
